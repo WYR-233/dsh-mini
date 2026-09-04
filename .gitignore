@@ -1,0 +1,13 @@
+# build outputs (never committed)
+stage/
+release/
+test/
+
+# runtime junk
+*.log
+.tray.log
+.temp/
+.npm-cache/
+
+# dev tools
+node_modules/

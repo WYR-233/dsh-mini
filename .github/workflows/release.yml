@@ -1,0 +1,66 @@
+# Build the dsh-mini installer on Windows and publish it as a GitHub Release.
+# Trigger: push a v* tag (e.g. v0.1.0) or run manually from the Actions tab.
+name: build-and-release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      # Portable Node runtime that ships inside the installer
+      - name: Download portable Node
+        shell: pwsh
+        run: |
+          Invoke-WebRequest -Uri 'https://nodejs.org/dist/v24.15.0/node-v24.15.0-win-x64.zip' -OutFile node.zip
+          Expand-Archive node.zip -DestinationPath portable
+          Remove-Item node.zip
+
+      # Assemble the release folder (npm install from the public registry)
+      - name: Stage release folder
+        shell: pwsh
+        run: |
+          Set-ExecutionPolicy -Scope Process Bypass -Force
+          & .\scripts\stage.ps1 -NodeDir (Join-Path $PWD 'portable\node-v24.15.0-win-x64')
+
+      # Sensitive-data gate: abort if credentials/settings sneak in
+      - name: Scan for sensitive data
+        shell: pwsh
+        run: |
+          Set-ExecutionPolicy -Scope Process Bypass -Force
+          & .\scripts\scan-sensitive.ps1
+
+      - name: Install Inno Setup
+        shell: pwsh
+        run: choco install innosetup -y --no-progress
+
+      - name: Compile installer
+        shell: cmd
+        run: |
+          "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" installer\dsh-mini.iss
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: dsh-mini-installer
+          path: release\*.exe
+
+      - name: Publish GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: release\*.exe
+          generate_release_notes: true
