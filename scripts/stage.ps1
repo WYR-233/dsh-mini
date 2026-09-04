@@ -81,3 +81,6 @@ if (Test-Path "$repoRoot\LICENSE") { Copy-Item "$repoRoot\LICENSE" "$out\LICENSE
 Write-Host "== stage complete =="
 $size = (Get-ChildItem $out -Recurse -File | Measure-Object Length -Sum).Sum
 Write-Host ("size: {0:N1} MB" -f ($size / 1MB))
+# robocopy returns 1 on success ("files copied"); without this, pwsh leaks
+# that exit code and CI marks the step failed even though staging worked.
+exit 0
