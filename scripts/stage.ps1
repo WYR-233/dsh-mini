@@ -8,11 +8,14 @@
 #   - home is seeded from the clean template in template\home
 #   - a portable Node runtime is copied into node\
 #   - the tray exe and icons are copied in
+#   - the dsh kernel version is a PARAMETER (-DshVersion), so a new build is
+#     just "change the number and re-run"; CI passes it from the workflow
 # Result: OutDir\ contains exactly what the installer packages.
 param(
-    [string]$OutDir = "stage",   # relative to repo root
-    [string]$NodeDir = "",       # portable node source dir; empty = skip node copy
-    [string]$Registry = ""       # npm registry override (e.g. https://registry.npmmirror.com)
+    [string]$OutDir = "stage",           # relative to repo root
+    [string]$NodeDir = "",               # portable node source dir; empty = skip node copy
+    [string]$Registry = "",              # npm registry override (e.g. https://registry.npmmirror.com)
+    [string]$DshVersion = "0.1.5-rc.1"   # @deepseek-ai/dsh kernel version that goes into app\package.json
 )
 $ErrorActionPreference = 'Stop'
 $repoRoot = Split-Path $PSScriptRoot -Parent
@@ -30,7 +33,12 @@ function Invoke-NpmInstall([string]$Dir) {
         }
         $regArg = ''
         if ($Registry -ne '') { $regArg = " --registry=$Registry" }
-        cmd /c "npm install --no-audit --no-fund --loglevel=error --prefer-offline --fetch-timeout=120000 --fetch-retries=3$regArg > npm-install.log 2>&1"
+        # NOTE: no --prefer-offline here. It makes npm trust a cached packument,
+        # so right after a version bump ("0.1.1-rc.2 -> 0.1.5-rc.1") the install
+        # dies with ETARGET "no matching version found" even though the version
+        # is published. Default freshness rules fetch new metadata and still
+        # reuse cached tarballs.
+        cmd /c "npm install --no-audit --no-fund --loglevel=error --fetch-timeout=120000 --fetch-retries=3$regArg > npm-install.log 2>&1"
         if ($LASTEXITCODE -ne 0) {
             throw "npm install failed in $Dir (see npm-install.log)"
         }
@@ -39,12 +47,15 @@ function Invoke-NpmInstall([string]$Dir) {
     }
 }
 
+if ([string]::IsNullOrWhiteSpace($DshVersion)) { throw "-DshVersion must not be empty" }
+
 Write-Host "== staging into $out =="
 if (Test-Path $out) { Remove-Item $out -Recurse -Force }
 New-Item -ItemType Directory -Force -Path "$out\app", "$out\home\profiles\web" | Out-Null
 
-# 1) dsh core into app\ (exact rc version, reproducible)
-$appPkg = '{"dependencies":{"@deepseek-ai/dsh":"0.1.1-rc.2"}}'
+# 1) dsh core into app\ (exact version, reproducible: pass -DshVersion <ver>)
+$appPkg = '{"dependencies":{"@deepseek-ai/dsh":"' + $DshVersion + '"}}'
+Write-Host "-- dsh kernel version: $DshVersion --"
 Set-Content -Path "$out\app\package.json" -Value $appPkg -Encoding ASCII
 Write-Host "-- npm install (app core, ~1-2 min) --"
 Invoke-NpmInstall "$out\app"
@@ -57,8 +68,10 @@ Write-Host "-- npm install (web profile) --"
 Invoke-NpmInstall "$out\home\profiles\web"
 
 # 4) strip source maps / type declarations (never read at runtime; keeps
-#    paths and package size down)
+#    paths and package size down) + npm build noise
 Write-Host "-- stripping .map / .d.ts --"
+Get-ChildItem $out -Recurse -Force -File -Filter 'npm-install.log' -ErrorAction SilentlyContinue |
+    Remove-Item -Force -ErrorAction SilentlyContinue
 foreach ($nm in @("$out\app\node_modules", "$out\home\profiles\web\node_modules")) {
     Get-ChildItem $nm -Recurse -File -Force -ErrorAction SilentlyContinue |
         Where-Object { $_.Name -match '\.map$|\.d\.(ts|mts|cts)$' } |

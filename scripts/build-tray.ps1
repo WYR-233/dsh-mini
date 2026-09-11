@@ -15,6 +15,14 @@ New-Item -ItemType Directory -Force -Path (Split-Path $out) | Out-Null
 if (Test-Path $out) { Remove-Item $out -Force }
 
 $src = Get-Content $srcPath -Raw
+# csc reads the source with the system ANSI codepage (GBK on Chinese Windows),
+# so any byte above 0x7F breaks the build ("newline in constant"). Chinese UI
+# strings must be \uXXXX escapes - fail loudly instead of letting csc moan.
+$nonAscii = [regex]::Matches($src, '[^\x00-\x7F]')
+if ($nonAscii.Count -gt 0) {
+    Write-Output "FAIL: $srcPath contains $($nonAscii.Count) non-ASCII character(s); use \uXXXX escapes"
+    exit 1
+}
 $refs = @('System.dll', 'System.Core.dll', 'System.Windows.Forms.dll',
           'System.Drawing.dll', 'System.Management.dll')
 

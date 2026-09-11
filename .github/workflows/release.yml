@@ -1,5 +1,12 @@
 # Build the dsh-mini installer on Windows and publish it as a GitHub Release.
-# Trigger: push a v* tag (e.g. v0.1.0) or run manually from the Actions tab.
+# Trigger: push a v* tag (e.g. v0.1.1) or run manually from the Actions tab.
+#
+# Two versions are parameterised end to end:
+#   - DSH_VERSION : the @deepseek-ai/dsh kernel bundled into app\   (stage.ps1 -DshVersion)
+#   - MINI_VERSION: the dsh-mini package version, i.e. the tag name (ISCC /DMyAppVersion)
+# Pushing tag v0.1.1 therefore yields DeepSeekHarnessMini-Setup-v0.1.1.exe
+# carrying kernel 0.1.5-rc.1 (recorded in the packaged app\package.json).
+# Change the numbers, re-run, done - no other edits needed.
 name: build-and-release
 
 on:
@@ -7,6 +14,15 @@ on:
     tags:
       - 'v*'
   workflow_dispatch:
+    inputs:
+      dsh_version:
+        description: 'Bundled dsh kernel version (e.g. 0.1.5-rc.1)'
+        required: true
+        default: '0.1.5-rc.1'
+      mini_version:
+        description: 'dsh-mini package version (e.g. 0.1.1)'
+        required: true
+        default: '0.1.1'
 
 permissions:
   contents: write
@@ -16,6 +32,21 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
+
+      - name: Resolve versions
+        shell: pwsh
+        run: |
+          $dsh = '${{ inputs.dsh_version }}'
+          $mini = '${{ inputs.mini_version }}'
+          # tag pushes leave the dispatch inputs empty: fall back to the defaults
+          if ([string]::IsNullOrWhiteSpace($dsh)) { $dsh = '0.1.5-rc.1' }
+          if ([string]::IsNullOrWhiteSpace($mini)) { $mini = '0.1.1' }
+          if ('${{ github.ref }}' -like 'refs/tags/v*') {
+            $mini = '${{ github.ref_name }}'.TrimStart('v')
+          }
+          "DSH_VERSION=$dsh" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "MINI_VERSION=$mini" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          Write-Host "kernel=$dsh  package=$mini"
 
       - uses: actions/setup-node@v4
         with:
@@ -34,7 +65,7 @@ jobs:
         shell: pwsh
         run: |
           Set-ExecutionPolicy -Scope Process Bypass -Force
-          & .\scripts\stage.ps1 -NodeDir (Join-Path $PWD 'portable\node-v24.15.0-win-x64')
+          & .\scripts\stage.ps1 -NodeDir (Join-Path $PWD 'portable\node-v24.15.0-win-x64') -DshVersion $env:DSH_VERSION
 
       # Sensitive-data gate: abort if credentials/settings sneak in
       - name: Scan for sensitive data
@@ -43,6 +74,13 @@ jobs:
           Set-ExecutionPolicy -Scope Process Bypass -Force
           & .\scripts\scan-sensitive.ps1
 
+      # Template gate: kernel version matches, home clean, bat/cmd pure ASCII
+      - name: Check packaged template
+        shell: pwsh
+        run: |
+          Set-ExecutionPolicy -Scope Process Bypass -Force
+          & .\scripts\check-package.ps1 -DshVersion $env:DSH_VERSION
+
       - name: Install Inno Setup
         shell: pwsh
         run: choco install innosetup -y --no-progress
@@ -50,7 +88,7 @@ jobs:
       - name: Compile installer
         shell: cmd
         run: |
-          "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" installer\dsh-mini.iss
+          "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" /DMyAppVersion=%MINI_VERSION% /DDshVersion=%DSH_VERSION% installer\dsh-mini.iss
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
@@ -58,9 +96,23 @@ jobs:
           name: dsh-mini-installer
           path: release\*.exe
 
+      - name: Ensure release notes exist
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: pwsh
+        run: |
+          # body_path below needs a real file; a missing notes file would fail
+          # the release step, so fall back to a one-liner.
+          $p = ".github/release-notes/${{ github.ref_name }}.md"
+          if (-not (Test-Path $p)) {
+            New-Item -ItemType Directory -Force -Path (Split-Path $p) | Out-Null
+            "dsh-mini ${{ github.ref_name }} - bundled dsh kernel $env:DSH_VERSION" |
+              Set-Content -Path $p -Encoding utf8
+          }
+
       - name: Publish GitHub Release
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
           files: release\*.exe
+          body_path: .github/release-notes/${{ github.ref_name }}.md
           generate_release_notes: true

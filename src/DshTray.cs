@@ -19,6 +19,9 @@ using Microsoft.Win32;
 //   - pnpm store lives in root\.pnpm-store, never on a fixed drive letter.
 //   - Process matching kills only node.exe running THIS install (root\app).
 //   - Optional port argument: DshMini.exe [port]  (default 2233).
+//   - DSH 0.1.5+ prints a per-process launch token URL on stdout; the tray
+//     captures it (live stdout + log fallback) and always opens the panel
+//     WITH the token, because the bare origin answers 401.
 public class DshTray
 {
     static string root;
@@ -30,6 +33,14 @@ public class DshTray
     static string logFile;
     static string url = "http://127.0.0.1:2233";
     static int port = 2233;
+    // DSH 0.1.5+ gates the web UI behind a per-process random launch token and
+    // prints "dsh web: http://127.0.0.1:2233/?token=<43 chars>" on stdout. The
+    // tray captures that URL and opens it; a bare origin would only show the
+    // 401 / enter-your-key page.
+    static string panelUrl = null;
+    static object panelLock = new object();
+    static readonly System.Text.RegularExpressions.Regex tokenRe =
+        new System.Text.RegularExpressions.Regex("https?://[^\\s\"]*\\?token=[A-Za-z0-9_\\-]+");
 
     static Process serverProc = null;
     static NotifyIcon trayIcon;
@@ -39,7 +50,8 @@ public class DshTray
     static void Main(string[] args)
     {
         // Optional port override: DshMini.exe 2234
-        // Stop mode: DshMini.exe --stop  (kills this install's node, then exits)
+        // Stop mode: DshMini.exe --stop  (kills this install's node server AND
+        // its resident tray, then exits - so a fresh double click works after)
         bool stopOnly = false;
         if (args != null && args.Length > 0)
         {
@@ -66,8 +78,12 @@ public class DshTray
         Mutex mutex = new Mutex(true, "DshMiniTray_Mutex_v1", out createdNew);
         if (!createdNew)
         {
-            // already running: just open the browser and exit
-            OpenBrowser();
+            // Tray of THIS install is already running: open its panel and exit.
+            // (If its server is down, the resident tray's menu "restart" is the
+            // way back; --stop kills the resident tray too, so a plain double
+            // click after --stop starts a fresh tray.)
+            AppendLog("second instance: tray already running, opening panel");
+            if (BrowserEnabled()) OpenBrowser();
             return;
         }
 
@@ -119,8 +135,10 @@ public class DshTray
     {
         ContextMenuStrip m = new ContextMenuStrip();
 
-        // "\u6253\u5f00\u9762\u677f" = open panel
-        m.Items.Add("\u6253\u5f00\u9762\u677f", null, delegate { OpenBrowser(); });
+        // "\u6253\u5f00\u9762\u677f" = open panel (starts the server when it is down)
+        m.Items.Add("\u6253\u5f00\u9762\u677f", null, delegate { OpenPanel(); });
+        // "\u590d\u5236\u9762\u677f\u5730\u5740(\u542b token)" = copy panel address incl. token
+        m.Items.Add("\u590d\u5236\u9762\u677f\u5730\u5740(\u542b token)", null, delegate { CopyPanelUrl(); });
         // "\u91cd\u542f" = restart
         m.Items.Add("\u91cd\u542f", null, delegate { Restart(); });
         m.Items.Add(new ToolStripSeparator());
@@ -147,10 +165,104 @@ public class DshTray
 
     // ---------- browser / port ----------
 
+    // Pull the launch-token URL out of one server output line.
+    static void CaptureToken(string line)
+    {
+        if (line == null) return;
+        if (line.IndexOf("token=", StringComparison.OrdinalIgnoreCase) < 0) return;
+        try
+        {
+            System.Text.RegularExpressions.Match m = tokenRe.Match(line);
+            if (!m.Success) return;
+            lock (panelLock) { panelUrl = m.Value; }
+        }
+        catch { }
+    }
+
+    // Fallback: recover the newest token URL from the tail of the tray log
+    // (needed when the server was already running before this tray started).
+    static string ScanLogForToken()
+    {
+        try
+        {
+            if (!File.Exists(logFile)) return null;
+            using (FileStream fs = new FileStream(logFile, FileMode.Open, FileAccess.Read, FileShare.ReadWrite))
+            {
+                long len = fs.Length;
+                int take = (int)Math.Min(len, 200000L);
+                fs.Seek(len - take, SeekOrigin.Begin);
+                byte[] buf = new byte[take];
+                int read = fs.Read(buf, 0, take);
+                string text = System.Text.Encoding.UTF8.GetString(buf, 0, read);
+                System.Text.RegularExpressions.MatchCollection ms = tokenRe.Matches(text);
+                if (ms.Count > 0) return ms[ms.Count - 1].Value;
+            }
+        }
+        catch { }
+        return null;
+    }
+
+    // Wait until the server printed its token URL (lands right after the port opens).
+    static void WaitToken(int timeoutMs)
+    {
+        int waited = 0;
+        while (waited < timeoutMs)
+        {
+            lock (panelLock) { if (panelUrl != null) return; }
+            Thread.Sleep(500);
+            waited += 500;
+        }
+    }
+
+    static string ResolvePanelUrl()
+    {
+        lock (panelLock) { if (panelUrl != null) return panelUrl; }
+        string scanned = ScanLogForToken();
+        if (scanned != null) { lock (panelLock) { panelUrl = scanned; } return scanned; }
+        return null;
+    }
+
     static void OpenBrowser()
     {
-        try { Process.Start(url); }
+        string target = ResolvePanelUrl();
+        bool withToken = target != null;
+        if (!withToken) target = url;
+        try
+        {
+            AppendLog("opening panel (" + (withToken ? "with launch token" : "no token found, plain origin") + ")");
+            Process.Start(target);
+        }
         catch (Exception ex) { AppendLog("[ERROR] open browser: " + ex.Message); }
+    }
+
+    // Menu action: open the panel, bringing the server up first when it is down.
+    static void OpenPanel()
+    {
+        if (!IsPortOpen())
+        {
+            AppendLog("open panel: server down, starting it");
+            lock (panelLock) { panelUrl = null; }
+            StartStartupThread();
+            return;
+        }
+        OpenBrowser();
+    }
+
+    // Menu action: copy the full panel address (token included) to the clipboard.
+    static void CopyPanelUrl()
+    {
+        string target = ResolvePanelUrl();
+        bool withToken = target != null;
+        if (!withToken) target = url;
+        try
+        {
+            Clipboard.SetText(target);
+            // "\u9762\u677f\u5730\u5740\u5df2\u590d\u5236" = panel address copied
+            ShowBalloon("\u9762\u677f\u5730\u5740\u5df2\u590d\u5236"
+                + (withToken ? "(\u542b\u5bc6\u94a5)" : "(\u65e0\u5bc6\u94a5)"),
+                withToken ? ToolTipIcon.Info : ToolTipIcon.Warning);
+        }
+        catch (Exception ex) { AppendLog("[ERROR] copy panel url: " + ex.Message); }
     }
 
     static bool IsPortOpen()
@@ -234,6 +346,38 @@ public class DshTray
         }
         catch { }
         KillHarnessNodes();
+        KillSiblingTrays();
+    }
+
+    // Kill the tray window process(es) of THIS install, never this very process.
+    // Without this, "--stop" would leave a resident tray whose server is dead:
+    // a later double click then finds the single-instance mutex taken, exits
+    // without starting anything, and the user is stuck with a dead panel.
+    static void KillSiblingTrays()
+    {
+        try
+        {
+            string self = root + "DshMini.exe";
+            int me = Process.GetCurrentProcess().Id;
+            ManagementObjectSearcher searcher =
+                new ManagementObjectSearcher("SELECT ProcessId, ExecutablePath FROM Win32_Process WHERE Name='DshMini.exe'");
+            foreach (ManagementObject obj in searcher.Get())
+            {
+                try
+                {
+                    int pid = Convert.ToInt32(obj["ProcessId"]);
+                    if (pid == me) continue;
+                    string path = obj["ExecutablePath"] as string;
+                    if (path == null) continue;
+                    if (!path.Equals(self, StringComparison.OrdinalIgnoreCase)) continue;
+                    Process.GetProcessById(pid).Kill();
+                    AppendLog("stopped sibling tray pid=" + pid);
+                }
+                catch { }
+            }
+            searcher.Dispose();
+        }
+        catch (Exception ex) { AppendLog("[ERROR] stop sibling trays: " + ex.Message); }
     }
 
     // Kill only node.exe whose command line contains THIS install's app dir.
@@ -278,7 +422,7 @@ public class DshTray
         {
             if (IsPortOpen())
             {
-                AppendLog("port already in use, opening browser only");
+                AppendLog("port already in use, recovering token from log and opening browser only");
                 if (BrowserEnabled()) OpenBrowser();
                 return;
             }
@@ -286,14 +430,19 @@ public class DshTray
             for (int attempt = 0; attempt < 2; attempt++)
             {
                 AppendLog("starting server (attempt " + (attempt + 1) + ")");
+                lock (panelLock) { panelUrl = null; }   // every server run gets a fresh token
                 StartServer();
                 if (!WaitPort(60000))
                 {
                     AppendLog("[ERROR] port not ready after 60s");
                     break;
                 }
-                AppendLog("port ready, opening browser, watchdog 15s in background");
-                if (BrowserEnabled()) OpenBrowser();
+                AppendLog("port ready, waiting for launch token");
+                if (BrowserEnabled())
+                {
+                    WaitToken(25000);
+                    OpenBrowser();
+                }
                 Thread.Sleep(15000);
                 if (IsPortOpen())
                 {
@@ -356,6 +505,7 @@ public class DshTray
         StopServer();
         // wait until the port is actually released (up to 10s)
         for (int i = 0; i < 20 && IsPortOpen(); i++) Thread.Sleep(500);
+        lock (panelLock) { panelUrl = null; }
         StartStartupThread();
     }
 
@@ -367,6 +517,7 @@ public class DshTray
             ShowBalloon("\u5df2\u6062\u590d\u56de\u6863\u70b9\uff0c\u6b63\u5728\u91cd\u542f", ToolTipIcon.Info);
         else
             ShowBalloon("\u6ca1\u6709\u53ef\u7528\u7684\u56de\u6863\u70b9", ToolTipIcon.Warning);
+        lock (panelLock) { panelUrl = null; }
         StartStartupThread();
     }
 
@@ -434,6 +585,7 @@ public class DshTray
     static void AppendLog(string line)
     {
         if (line == null) return;
+        CaptureToken(line);
         try
         {
             lock (logLock)

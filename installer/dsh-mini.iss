@@ -9,7 +9,15 @@
 ;   - desktop icon + start menu icon + optional run-after-install
 
 #define MyAppName "DeepSeek Harness Mini"
-#define MyAppVersion "0.1.0"
+; Package (dsh-mini) version. Override from the command line when cutting a
+; release:  ISCC.exe /DMyAppVersion=0.1.2 installer\dsh-mini.iss
+#ifndef MyAppVersion
+  #define MyAppVersion "0.1.1"
+#endif
+; Bundled dsh kernel, shown on the wizard and in the installed marker.
+#ifndef DshVersion
+  #define DshVersion "0.1.5-rc.1"
+#endif
 #define MyAppPublisher "WYR-233"
 #define MyAppURL "https://github.com/WYR-233/dsh-mini"
 #define MyAppExeName "DshMini.exe"
@@ -18,7 +26,7 @@
 AppId={{B7E4F6A2-9C31-4D7E-8A0F-2D5E9C1B4A60}
 AppName={#MyAppName}
 AppVersion={#MyAppVersion}
-AppVerName={#MyAppName} {#MyAppVersion}
+AppVerName={#MyAppName} {#MyAppVersion} (dsh {#DshVersion})
 AppPublisher={#MyAppPublisher}
 AppPublisherURL={#MyAppURL}
 AppSupportURL={#MyAppURL}
