@@ -79,6 +79,8 @@ dsh-mini/
 │   ├── make-wizard-assets.ps1  生成向导图 BMP
 │   ├── make-icons.ps1      生成多尺寸 ico
 │   ├── check-package.ps1   打包体检(内核版本/干净 home/bat 纯 ASCII)
+│   ├── smoke-test.ps1      干净目录冒烟(装→启动→token 面板→重启→卸载)
+│   ├── publish-gitee-release.ps1  把安装包同步成 Gitee 发行版
 │   └── scan-sensitive.ps1  敏感信息扫描
 ├── template/home/  干净的 home 模板(无凭据无设置)
 ├── installer/      Inno Setup 脚本 + 中文语言包
@@ -97,6 +99,15 @@ ISCC.exe /DMyAppVersion=0.1.1 /DDshVersion=0.1.5-rc.1 installer\dsh-mini.iss
 换内核版本 = 改 `-DshVersion` 一个参数重跑;换包版本号 = 改 `-DMyAppVersion`(或直接推 `v*` 标签,CI 自动取标签号)。
 
 **发布:** 推送 `v*` 标签,Actions 自动在 Windows runner 上组装+打包+发 Release(内核版本走 `workflow_dispatch` 入参,默认 0.1.5-rc.1)。
+
+**国内镜像:** CI 出包后,把 Release 那份安装包同步到 Gitee 发行版:
+
+```
+$env:GITEE_TOKEN = '<私人令牌,projects 权限>'
+powershell scripts\publish-gitee-release.ps1 -Tag v0.1.1 -BodyFile .github\release-notes\v0.1.1.md -Asset release\DeepSeekHarnessMini-Setup-v0.1.1.exe
+```
+
+**验收:** `powershell scripts\smoke-test.ps1 -Installer <安装包> -Uninstall`(干净目录安装→启动→裸开 401→带 token 进面板→重启仍可开→卸载 0 残留;默认用 2255 端口,不碰在跑的 DSH)。
 
 ## 许可
 
