@@ -106,9 +106,17 @@ else { Bad "no token url found in tray log" }
 
 if ($NoBrowser) {
     Ok "browser suppressed (-NoBrowser); token url above is what the tray would open"
-} elseif ((Test-Path $trayLog) -and (Select-String -Path $trayLog -Pattern 'opening panel \(with launch token\)' -Quiet)) {
-    Ok "tray opened the panel WITH token (browser launched)"
-} else { Bad "tray log has no 'opening panel (with launch token)' line" }
+} else {
+    # the "opening panel" line is appended right AFTER the token url lands, so
+    # give the tray a moment instead of racing it
+    $opened = $false
+    for ($i = 0; $i -lt 20; $i++) {
+        if ((Test-Path $trayLog) -and (Select-String -Path $trayLog -Pattern 'opening panel \(with launch token\)' -Quiet)) { $opened = $true; break }
+        Start-Sleep -Seconds 1
+    }
+    if ($opened) { Ok "tray opened the panel WITH token (browser launched)" }
+    else { Bad "tray log has no 'opening panel (with launch token)' line" }
+}
 
 # --------------------------------------------------------- 401 vs token url
 Write-Host "== 3/6 panel access: bare origin must 401, token url must get in =="
